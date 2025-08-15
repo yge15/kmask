@@ -69,6 +69,12 @@ std::string mask_low_entropy_regions(const std::string& sequence, size_t k, size
     std::string masked = sequence;
     for (size_t i = 0; i <= sequence.size() - k; ++i) {
         std::string kmer = sequence.substr(i, k);
+        
+        // Skip this kmer if it contains at least one 'N'
+        if (kmer.find('N') != std::string::npos) {
+            continue;
+        }
+
         auto counts = count_lmers(kmer, l);
         double entropy = compute_shannon_entropy(counts);
         if (entropy < threshold) {
