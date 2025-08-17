@@ -126,13 +126,15 @@ int main(int argc, char* argv[]) {
     }
 
     // Print global summary
-    std::cerr << "\n========== GLOBAL SUMMARY ==========\n";
-    std::cerr << "Total bases processed : " << total_bases_processed.load() << "\n";
-    std::cerr << "Total bases masked    : " << total_bases_masked.load() << "\n";
-    if (total_bases_processed > 0) {
-        double percent = 100.0 * total_bases_masked.load() / total_bases_processed.load();
-        std::cerr << "Masked percent        : " << percent << "%\n";
+    if (verbose) {
+        std::cerr << "\n========== GLOBAL SUMMARY ==========\n";
+        std::cerr << "Total bases processed : " << total_bases_processed.load() << "\n";
+        std::cerr << "Total bases masked    : " << total_bases_masked.load() << "\n";
+        if (total_bases_processed > 0) {
+            double percent = 100.0 * total_bases_masked.load() / total_bases_processed.load();
+            std::cerr << "Masked percent        : " << percent << "%\n";
+        }
     }
-
+    
     return 0;
 }

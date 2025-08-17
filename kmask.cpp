@@ -180,18 +180,20 @@ std::pair<std::size_t, std::size_t> process_fasta(
 
     // Calculate summary stats
     size_t masked_count = 0, total_count = 0;
-    for (const auto& [_, masked] : masked_entries) {
-        masked_count += count_masked_bases(masked);
-        total_count += masked.size();
-    }
-    double percent = (total_count > 0) ? (100.0 * masked_count / total_count) : 0.0;
+    if (verbose) {
+        for (const auto& [_, masked] : masked_entries) {
+            masked_count += count_masked_bases(masked);
+            total_count += masked.size();
+        }
+        double percent = (total_count > 0) ? (100.0 * masked_count / total_count) : 0.0;
 
-    // Print summary and manifest info to stderr (thread-safe)
-    {
-        std::lock_guard<std::mutex> lock(stats_mutex);
-        std::cerr << "[SUMMARY] " << input_file << " | Masked " << masked_count
-                  << " / " << total_count << " (" << percent << "%)\n";
-        std::cerr << "[MANIFEST] " << input_file << " → " << out_path << "\n";
+        // Print summary and manifest info to stderr (thread-safe)
+        {
+            std::lock_guard<std::mutex> lock(stats_mutex);
+            std::cerr << "[SUMMARY] " << input_file << " | Masked " << masked_count
+                    << " / " << total_count << " (" << percent << "%)\n";
+            std::cerr << "[MANIFEST] " << input_file << " → " << out_path << "\n";
+        }
     }
 
     return {masked_count, total_count};
