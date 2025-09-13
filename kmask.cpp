@@ -16,6 +16,7 @@ std::mutex stats_mutex;     // Mutex for stderr summary/logging
 // Reads multi-entry FASTA and returns vector of <header, sequence>
 std::vector<std::pair<std::string, std::string>> read_fasta(const std::string& filename) {
     std::ifstream file(filename);
+    
     if (!file.is_open()) {
         throw std::runtime_error("[ERROR] Cannot open file: " + filename);
     }
@@ -45,6 +46,7 @@ std::vector<std::pair<std::string, std::string>> read_fasta(const std::string& f
 // Counts l-mers (substrings of length l) in a kmer
 std::unordered_map<std::string, int> count_lmers(const std::string& kmer, size_t l) {
     std::unordered_map<std::string, int> counts;
+
     if (kmer.size() < l) return counts;
     for (size_t i = 0; i <= kmer.size() - l; ++i) {
         counts[kmer.substr(i, l)]++;
@@ -56,6 +58,7 @@ std::unordered_map<std::string, int> count_lmers(const std::string& kmer, size_t
 double compute_shannon_entropy(const std::unordered_map<std::string, int>& counts) {
     double entropy = 0.0;
     int total = 0;
+
     for (const auto& p : counts) total += p.second;
     for (const auto& p : counts) {
         double p_i = static_cast<double>(p.second) / total;
@@ -67,6 +70,7 @@ double compute_shannon_entropy(const std::unordered_map<std::string, int>& count
 // Mask low entropy regions: replace kmers with 'N's if entropy < threshold
 std::string mask_low_entropy_regions(const std::string& sequence, size_t k, size_t l, double threshold) {
     std::string masked = sequence;
+
     for (size_t i = 0; i <= sequence.size() - k; ++i) {
         std::string kmer = sequence.substr(i, k);
         
@@ -93,6 +97,7 @@ size_t count_masked_bases(const std::string& sequence) {
 void write_fasta(const std::string& filename, 
                  const std::vector<std::pair<std::string, std::string>>& entries) {
     std::ofstream file(filename);
+
     if (!file.is_open()) {
         throw std::runtime_error("[ERROR] Cannot write to file: " + filename);
     }
@@ -111,6 +116,7 @@ void write_bed(const std::string& header,
                const std::string& masked_sequence,
                const std::string& full_command) {
     static std::once_flag header_printed;
+    
     std::call_once(header_printed, [&]() {
         std::lock_guard<std::mutex> lock(bed_mutex);
         std::cout << "# " << full_command << "\n";
@@ -163,23 +169,27 @@ std::pair<std::size_t, std::size_t> process_fasta(
 
     std::filesystem::path in_path(input_file);
     std::string out_path;
+    std::string stem = in_path.stem().string();        // "abc"
+    std::string ext  = in_path.extension().string();   // ".fasta", ".fa", ".fna", etc.
+
     if (verbose) {
         std::ostringstream name;
-        name << in_path.stem().string()
-             << "-k" << k
-             << "-l" << l
-             << "-s" << std::fixed << std::setprecision(2) << threshold
-             << "-kmasked.fna";
+        name << stem
+            << "-k" << k
+            << "-l" << l
+            << "-s" << std::fixed << std::setprecision(2) << threshold
+            << "-kmasked" << ext;   // preserve original extension
         out_path = (std::filesystem::path(output_dir) / name.str()).string();
     } else {
         out_path = (std::filesystem::path(output_dir) /
-                    (in_path.stem().string() + "-kmasked.fna")).string();
+                    (stem + "-kmasked" + ext)).string();
     }
 
     write_fasta(out_path, masked_entries);
 
     // Calculate summary stats
     size_t masked_count = 0, total_count = 0;
+    
     if (verbose) {
         for (const auto& [_, masked] : masked_entries) {
             masked_count += count_masked_bases(masked);
