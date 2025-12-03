@@ -7,8 +7,8 @@
 ---
 
 ## Usage
-./kmask -k <kmer_len> -l <lmer_len> -s <threshold> -t <threads> \
-        [-o <output_dir>] [-b] [-v] <fasta1> [fasta2...]
+./kmask -k \<kmer_len\> -l \<lmer_len\> -s \<threshold\> -t \<threads\> \
+        [-o \<output_dir\>] [-b] [-v] \<fasta1\> [fasta2...]
 
 ## Options
 - `-k`, `--kmer_len <int>`  
@@ -51,4 +51,4 @@ If you use **Kmask** in published work, please cite:
 
 ## License
 
-Kmask is distributed under the terms of the [GNU General Public License (GPL)](LICENSE)
+**Kmask** is distributed under the terms of the [GNU General Public License (GPL)](LICENSE)
