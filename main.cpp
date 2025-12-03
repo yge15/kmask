@@ -2,6 +2,7 @@
 
 #include "kmask.hpp"
 #include "progress.hpp"
+
 #include <getopt.h>
 #include <filesystem>
 #include <iostream>
@@ -10,6 +11,7 @@
 #include <mutex>
 #include <atomic>
 #include <iomanip>
+#include <algorithm>
 
 int main(int argc, char* argv[]) {
     // Default parameters
@@ -128,8 +130,9 @@ int main(int argc, char* argv[]) {
     };
 
     // Launch threads
+    num_threads = std::max(1, num_threads);     // in case user passes -t 0 or a negative value
     std::vector<std::thread> threads;
-    threads.reserve(static_cast<std::size_t>(std::max(1, num_threads)));
+    threads.reserve(static_cast<std::size_t>(num_threads));
     for (int i = 0; i < num_threads; ++i) {
         threads.emplace_back(worker);
     }

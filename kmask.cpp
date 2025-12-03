@@ -2,6 +2,7 @@
 
 #include "kmask.hpp"
 #include <getopt.h>
+
 #include <fstream>
 #include <iostream>
 #include <iomanip>
@@ -9,78 +10,160 @@
 #include <cmath>
 #include <algorithm>
 #include <mutex>
+#include <sstream>
+#include <vector>
+#include <string>
 
 std::mutex bed_mutex;       // Mutex for BED stdout writing
 std::mutex stats_mutex;     // Mutex for stderr summary/logging
 
-// Reads multi-entry FASTA and returns vector of <header, sequence>
-std::vector<std::pair<std::string, std::string>> read_fasta(const std::string& filename) {
-    std::ifstream file(filename);
-    
-    if (!file.is_open()) {
-        throw std::runtime_error("[ERROR] Cannot open file: " + filename);
-    }
+// -------------------- FASTA I/O --------------------
 
-    std::vector<std::pair<std::string, std::string>> entries;
-    std::string line, header, sequence;
+// Read one FASTA entry at a time from an existing stream
+bool read_fasta(std::istream& in, std::string& header, std::string& sequence) {
+    header.clear();
+    sequence.clear();
+    std::string line;
 
-    while (std::getline(file, line)) {
+    // 1) Find next header
+    while (std::getline(in, line)) {
         if (line.empty()) continue;
         if (line[0] == '>') {
-            if (!header.empty()) {
-                entries.emplace_back(header, sequence);
-                sequence.clear();
-            }
-            header = line.substr(1);  // Remove '>'
-        } else {
-            for (char c : line) sequence += std::toupper(c);
+            header = line.substr(1);  // remove '>'
+            break;
         }
     }
-
-    if (!header.empty()) {
-        entries.emplace_back(header, sequence);
+    if (header.empty()) {
+        return false;
     }
-    return entries;
+
+    // 2) Read sequence lines until next header or EOF
+    while (true) {
+        std::streampos pos = in.tellg();
+        if (!std::getline(in, line)) {
+            // EOF
+            break;
+        }
+        if (!line.empty() && line[0] == '>') {
+            // Next header
+            in.seekg(pos);  // rewind
+            break;
+        }
+
+        // Allocate more space for the new line
+        sequence.reserve(sequence.size() + line.size());
+        for (size_t i = 0; i < line.size(); ++i) {
+            unsigned char c = static_cast<unsigned char>(line[i]);
+            if (c <= 32) continue;          // Skip whitespace
+            if (c >= 'a' && c <= 'z') c -= 32; // ASCII uppercase
+            sequence.push_back(static_cast<char>(c));
+        }
+    }
+    return true;
+}
+
+// -------------------- ENTROPY HELPERS --------------------
+
+// Convert base char to 0–3 code for A,C,G,T or -1 for others
+static inline int base_to_code(char c) {
+    switch (c) {
+        case 'A': return 0;
+        case 'C': return 1;
+        case 'G': return 2;
+        case 'T': return 3;
+        default:  return -1;
+    }
 }
 
 // Counts l-mers (substrings of length l) in a kmer
-std::unordered_map<std::string, int> count_lmers(const std::string& kmer, size_t l) {
-    std::unordered_map<std::string, int> counts;
+static inline bool count_lmers(const std::string& sequence,
+                               size_t start,
+                               size_t k,
+                               size_t l,
+                               std::vector<int>& counts) {
+    // Reset counts
+    std::fill(counts.begin(), counts.end(), 0);
 
-    if (kmer.size() < l) return counts;
-    for (size_t i = 0; i <= kmer.size() - l; ++i) {
-        counts[kmer.substr(i, l)]++;
+    // Check for Ns and invalid bases
+    for (size_t j = 0; j < k; ++j) {
+        int code = base_to_code(sequence[start + j]);
+        if (code < 0) return false;        // invalid base → skip
+        // if (sequence[start + j] == 'N') return false;
     }
-    return counts;
+
+    // Rolling encoding of l-mers
+    size_t num_states = counts.size();         // 4^l = 2^(2*l) possible l-mers
+    size_t bit_mask = num_states - 1;          // bitmask with last 2*l bits = 1
+    size_t bit_code = 0;                       // rolling 2-bit-encoded l-mer
+    size_t len = 0;                            // number of bases encoded
+
+    for (size_t j = 0; j < k; ++j) {
+        // Encode next base into 2 bits
+        int b = base_to_code(sequence[start + j]);
+        // Shift previous bits left by 2 and OR with the new base
+        bit_code = (bit_code << 2) | static_cast<size_t>(b);
+
+        if (len + 1 < l) {
+            ++len;
+            continue;
+        }
+        if (len + 1 == l) {
+            ++len;
+            counts[bit_code & bit_mask]++;
+        } else {
+            bit_code &= bit_mask;
+            counts[bit_code]++;
+        }
+    }
+    return true;  // valid l-mers counted
 }
 
 // Compute Shannon entropy from l-mer counts
-double compute_shannon_entropy(const std::unordered_map<std::string, int>& counts) {
-    double entropy = 0.0;
-    int total = 0;
+static inline double compute_shannon_entropy(const std::vector<int>& counts, int total_lmers) {
+    if (total_lmers <= 0) {
+        return 0.0;
+    }
 
-    for (const auto& p : counts) total += p.second;
-    for (const auto& p : counts) {
-        double p_i = static_cast<double>(p.second) / total;
-        if (p_i > 0) entropy -= p_i * std::log2(p_i);
+    double entropy = 0.0;
+    for (int c : counts) {
+        if (c <= 0) continue;  // skip unused l-mer states
+        double p = static_cast<double>(c) / static_cast<double>(total_lmers);
+        entropy -= p * std::log2(p);
     }
     return entropy;
 }
 
+// -------------------- MASKING & COUNTING --------------------
+
 // Mask low entropy regions: replace kmers with 'N's if entropy < threshold
-std::string mask_low_entropy_regions(const std::string& sequence, size_t k, size_t l, double threshold) {
+std::string mask_low_entropy_regions(const std::string& sequence,
+                                     size_t k, size_t l,
+                                     double threshold) {
+    const size_t n = sequence.size();
+    if (k == 0 || l == 0 || l > k || n < k) {
+        return sequence;
+    }
+
     std::string masked = sequence;
 
-    for (size_t i = 0; i <= sequence.size() - k; ++i) {
-        std::string kmer = sequence.substr(i, k);
-        
-        // Skip this kmer if it contains at least one 'N'
-        if (kmer.find('N') != std::string::npos) {
+    // Pre-allocate l-mer count array once
+    // Number of possible l-mers = 4^l = 1 << (2*l)
+    const size_t num_states = static_cast<size_t>(1ULL) << (2 * l);
+    std::vector<int> counts(num_states);
+
+    const int total_lmers = static_cast<int>(k - l + 1);
+
+    // Slide a k-mer window across the sequence
+    for (size_t i = 0; i + k <= n; ++i) {
+        // Fill counts for all l-mers within this k-mer
+        if (!count_lmers(sequence, i, k, l, counts)) {
             continue;
         }
 
-        auto counts = count_lmers(kmer, l);
-        double entropy = compute_shannon_entropy(counts);
+        // Compute Shannon entropy (bits) for this k-mer
+        double entropy = compute_shannon_entropy(counts, total_lmers);
+
+        // Mask low-entropy k-mers with 'N'
         if (entropy < threshold) {
             masked.replace(i, k, std::string(k, 'N'));
         }
@@ -88,60 +171,76 @@ std::string mask_low_entropy_regions(const std::string& sequence, size_t k, size
     return masked;
 }
 
-// Count how many bases are masked (N)
-size_t count_masked_bases(const std::string& sequence) {
-    return std::count(sequence.begin(), sequence.end(), 'N');
+// Count how many bases are masked (Ns)
+static inline size_t count_masked_bases(const std::string& original_sequence,
+                                        const std::string& masked_sequence) {
+    const size_t len = std::min(original_sequence.size(), masked_sequence.size());
+    size_t num_masked = 0;
+
+    // Only account for the newly introduced Ns
+    for (size_t i = 0; i < len; ++i) {
+        if (original_sequence[i] != 'N' && masked_sequence[i] == 'N') {
+            ++num_masked;
+        }
+    }
+    return num_masked;
 }
 
+// -------------------- TOP-LEVEL PROCESSING --------------------
+
 // Write masked FASTA entries to output file
-void write_fasta(const std::string& filename, 
-                 const std::vector<std::pair<std::string, std::string>>& entries) {
-    std::ofstream file(filename);
-
-    if (!file.is_open()) {
-        throw std::runtime_error("[ERROR] Cannot write to file: " + filename);
-    }
-
+void write_fasta(std::ofstream& out, 
+                 const std::string& header,
+                 const std::string& sequence) {
     constexpr size_t line_width = 80;
-    for (const auto& [header, sequence] : entries) {
-        file << ">" << header << "\n";
-        for (size_t i = 0; i < sequence.size(); i += line_width) {
-            file << sequence.substr(i, line_width) << "\n";
-        }
+    out << ">" << header << "\n";
+    for (size_t i = 0; i < sequence.size(); i += line_width) {
+        out << sequence.substr(i, line_width) << "\n";
     }
 }
 
 // Write masked regions in BED format to stdout, with thread-safe printing
 void write_bed(const std::string& header,
+               const std::string& original_sequence,
                const std::string& masked_sequence,
                const std::string& full_command) {
     static std::once_flag header_printed;
-    
+
+    // Print BED header once with the full command line
     std::call_once(header_printed, [&]() {
         std::lock_guard<std::mutex> lock(bed_mutex);
         std::cout << "# " << full_command << "\n";
     });
 
     std::vector<std::pair<size_t, size_t>> masked_regions;
-    bool in_mask = false;
-    size_t start = 0;
+    bool in_mask = false;   // true when currently inside a newly-masked stretch
+    size_t start = 0;       // start coordinate of the current masked stretch
 
-    for (size_t i = 0; i < masked_sequence.size(); ++i) {
-        if (masked_sequence[i] == 'N') {
+    const size_t len = std::min(original_sequence.size(), masked_sequence.size());
+
+    for (size_t i = 0; i < len; ++i) {
+        bool newly_masked = (original_sequence[i] != 'N' && masked_sequence[i] == 'N');
+
+        if (newly_masked) {
             if (!in_mask) {
-                start = i;
                 in_mask = true;
+                start = i;
             }
-        } else if (in_mask) {
-            masked_regions.emplace_back(start, i);
-            in_mask = false;
+        } else {
+            if (in_mask) {
+                masked_regions.emplace_back(start, i);
+                in_mask = false;
+            }
         }
     }
-    if (in_mask) masked_regions.emplace_back(start, masked_sequence.size());
+    // When the masked stretch reaches the end of the sequence
+    if (in_mask) {
+        masked_regions.emplace_back(start, len);
+    }
 
     std::lock_guard<std::mutex> lock(bed_mutex);
-    for (const auto& [start, end] : masked_regions) {
-        std::cout << header << "\t" << start << "\t" << end << "\n";
+    for (const auto& region : masked_regions) {
+        std::cout << header << "\t" << region.first << "\t" << region.second << "\n";
     }
 }
 
@@ -152,58 +251,79 @@ std::pair<std::size_t, std::size_t> process_fasta(
     const std::string& output_dir,
     bool verbose,
     bool output_bed,
-    const std::string& full_command) 
+    const std::string& full_command)
 {
-    auto entries = read_fasta(input_file);
-    std::vector<std::pair<std::string, std::string>> masked_entries;
-
-    for (const auto& [header, sequence] : entries) {
-        std::string masked_sequence = mask_low_entropy_regions(sequence, k, l, threshold);
-
-        if (output_bed) {
-            write_bed(header, masked_sequence, full_command);
-        }
-
-        masked_entries.emplace_back(header, masked_sequence);
-    }
-
+    // Derive output filename
     std::filesystem::path in_path(input_file);
+    std::string stem = in_path.stem().string();   // e.g. "abc"
+    std::string ext  = in_path.extension().string(); // e.g. ".fna", ".fa", ".fasta"
     std::string out_path;
-    std::string stem = in_path.stem().string();        // "abc"
-    std::string ext  = in_path.extension().string();   // ".fasta", ".fa", ".fna", etc.
 
     if (verbose) {
         std::ostringstream name;
         name << stem
-            << "-k" << k
-            << "-l" << l
-            << "-s" << std::fixed << std::setprecision(2) << threshold
-            << "-kmasked" << ext;   // preserve original extension
+             << "-k" << k
+             << "-l" << l
+             << "-s" << std::fixed << std::setprecision(2) << threshold
+             << "-kmasked" << ext;   // preserve original extension
         out_path = (std::filesystem::path(output_dir) / name.str()).string();
     } else {
         out_path = (std::filesystem::path(output_dir) /
                     (stem + "-kmasked" + ext)).string();
     }
 
-    write_fasta(out_path, masked_entries);
+    // Open input FASTA
+    std::ifstream in(input_file);
+    if (!in.is_open()) {
+        throw std::runtime_error("[ERROR] Cannot open file: " + input_file);
+    }
+
+    // Open output FASTA
+    std::ofstream out(out_path);
+    if (!out.is_open()) {
+        throw std::runtime_error("[ERROR] Cannot write to file: " + out_path);
+    }
 
     // Calculate summary stats
-    size_t masked_count = 0, total_count = 0;
-    
-    if (verbose) {
-        for (const auto& [_, masked] : masked_entries) {
-            masked_count += count_masked_bases(masked);
-            total_count += masked.size();
-        }
-        double percent = (total_count > 0) ? (100.0 * masked_count / total_count) : 0.0;
+    size_t masked_count = 0;
+    size_t total_count  = 0;
 
-        // Print summary and manifest info to stderr (thread-safe)
-        {
-            std::lock_guard<std::mutex> lock(stats_mutex);
-            std::cerr << "[SUMMARY] " << input_file << " | Masked " << masked_count
-                    << " / " << total_count << " (" << percent << "%)\n";
-            std::cerr << "[MANIFEST] " << input_file << " → " << out_path << "\n";
+    std::string header;
+    std::string sequence;
+
+    // Stream one FASTA entry at a time
+    while (read_fasta(in, header, sequence)) {
+        // Mask low-entropy regions in this entry
+        std::string masked_sequence = mask_low_entropy_regions(sequence, k, l, threshold);
+
+        // Optionally write BED intervals for this entry (thread-safe inside write_bed)
+        if (output_bed) {
+            write_bed(header, sequence, masked_sequence, full_command);
         }
+
+        // Write masked FASTA entry
+        write_fasta(out, header, masked_sequence);
+
+        // Accumulate stats only when verbose
+        if (verbose) {
+            masked_count += count_masked_bases(sequence, masked_sequence);
+            total_count  += sequence.size();
+        }
+    }
+
+    // Thread-safe summary + manifest
+    if (verbose) {
+        double percent = (total_count > 0)
+            ? (100.0 * static_cast<double>(masked_count) / static_cast<double>(total_count))
+            : 0.0;
+
+        std::lock_guard<std::mutex> lock(stats_mutex);
+        std::cerr << "[SUMMARY] " << input_file
+                  << " | Masked " << masked_count
+                  << " / " << total_count
+                  << " (" << percent << "%)\n";
+        std::cerr << "[MANIFEST] " << input_file
+                  << " → " << out_path << "\n";
     }
 
     return {masked_count, total_count};
