@@ -13,9 +13,29 @@
 #include <iomanip>
 #include <algorithm>
 
+// Print command-line usage
+void print_help(const char* program_name) {
+    std::cerr <<
+        "Usage:\n"
+        "  " << program_name << " -k <kmer_len> -l <lmer_len> -s <threshold> -t <threads>\n"
+        "       [-o <output_dir>] [-b] [-v] <fasta1> [fasta2...]\n\n"
+        "Options:\n"
+        "  -k, --kmer_len <int>        Length of k-mers (default: 31)\n"
+        "  -l, --lmer_len <int>        Length of l-mers (default: 3)\n"
+        "  -s, --threshold <float>     Entropy threshold (defualt: 3.4)\n"
+        "  -t, --threads <int>         Number of threads (default: 1)\n"
+        "  -o, --output-dir <path>     Output directory (default: .)\n"
+        "  -b, --bed                   Output BED of masked regions\n"
+        "  -v, --verbose               Enable detailed logging: per-file summaries and global statistics\n"
+        "  -h, --help                  Display usage information\n\n"
+        "Example:\n"
+        "  " << program_name << " -k 31 -l 3 -s 3.4 -t 8 -o masked/ genome.fa\n";
+}
+
 int main(int argc, char* argv[]) {
     // Default parameters
-    std::size_t k = 31, l = 3;
+    std::size_t k = 31;
+    std::size_t l = 3;
     double entropy_threshold = 3.4;
     int num_threads = 1;
     bool output_bed = false;
@@ -30,7 +50,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Parse command line arguments
-    const char* short_opts = "k:l:s:t:bo:v";
+    const char* short_opts = "k:l:s:t:bo:vh";
     const option long_opts[] = {
         {"kmer_len",   required_argument, nullptr, 'k'},
         {"lmer_len",   required_argument, nullptr, 'l'},
@@ -39,6 +59,7 @@ int main(int argc, char* argv[]) {
         {"bed",        no_argument,       nullptr, 'b'},
         {"output-dir", required_argument, nullptr, 'o'},
         {"verbose",    no_argument,       nullptr, 'v'},
+        {"help",       no_argument,       nullptr, 'h'},
         {nullptr, 0, nullptr, 0}
     };
 
@@ -52,9 +73,11 @@ int main(int argc, char* argv[]) {
             case 'b': output_bed = true; break;
             case 'o': output_dir = optarg; break;
             case 'v': verbose = true; break;
+            case 'h':
+                print_help(argv[0]);
+                return 0;
             default:
-                std::cerr << "Usage: " << argv[0]
-                          << " -k <kmer_len> -l <lmer_len> -s <threshold> -t <threads> [-o <output_dir>] [-b] [-v] <fasta1> [fasta2...]\n";
+                print_help(argv[0]);
                 return 1;
         }
     }
