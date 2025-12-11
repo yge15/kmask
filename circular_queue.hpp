@@ -2,6 +2,7 @@
 #define __CIRCULAR_QUEUE_HPP__
 
 #include <vector>
+#include <cassert>
 #include <cstdint>
 
 template <typename T>
