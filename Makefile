@@ -1,6 +1,6 @@
 # Makefile for kmask
 CXX := g++
-CXXFLAGS := -std=c++17 -pthread
+CXXFLAGS := -std=c++17 -pthread -O3 -march=core-avx2
 LDFLAGS := -lstdc++fs
 
 TARGET := kmask
