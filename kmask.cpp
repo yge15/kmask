@@ -1,7 +1,9 @@
 // kmask.cpp
 
 #include "kmask.hpp"
+#include "circular_queue.hpp"
 #include <getopt.h>
+#include <assert.h>
 
 #include <fstream>
 #include <iostream>
@@ -80,42 +82,43 @@ static inline bool count_lmers(const std::string& sequence,
                                size_t start,
                                size_t k,
                                size_t l,
-                               std::vector<int>& counts) {
-    // Reset counts
-    std::fill(counts.begin(), counts.end(), 0);
-
-    // Check for Ns and invalid bases
-    for (size_t j = 0; j < k; ++j) {
-        int code = base_to_code(sequence[start + j]);
-        if (code < 0) return false;        // invalid base → skip
-        // if (sequence[start + j] == 'N') return false;
-    }
-
+                               std::vector<int>& counts,
+                               CircularQueue<size_t>& lmer_queue,
+                               size_t& len) {
     // Rolling encoding of l-mers
-    size_t num_states = counts.size();         // 4^l = 2^(2*l) possible l-mers
+    size_t num_states = counts.size() - 1;         // 4^l = 2^(2*l) possible l-mers
     size_t bit_mask = num_states - 1;          // bitmask with last 2*l bits = 1
     size_t bit_code = 0;                       // rolling 2-bit-encoded l-mer
-    size_t len = 0;                            // number of bases encoded
 
     for (size_t j = 0; j < k; ++j) {
         // Encode next base into 2 bits
         int b = base_to_code(sequence[start + j]);
-        // Shift previous bits left by 2 and OR with the new base
-        bit_code = (bit_code << 2) | static_cast<size_t>(b);
+        if (b < 0) {
+            len = 0;
+            bit_code = num_states;
+        } else {
+            // Shift previous bits left by 2 and OR with the new base
+            bit_code = ((bit_code << 2) | static_cast<size_t>(b)) & bit_mask;
+        }
+
+        --counts[lmer_queue.front()];
 
         if (len + 1 < l) {
             ++len;
+            lmer_queue.push_back(num_states);
             continue;
         }
-        if (len + 1 == l) {
-            ++len;
-            counts[bit_code & bit_mask]++;
-        } else {
-            bit_code &= bit_mask;
-            counts[bit_code]++;
-        }
+
+        lmer_queue.push_back(bit_code);
+        len = std::min(len + 1, l);
+
+        ++counts[bit_code];
     }
-    return true;  // valid l-mers counted
+
+    // make sure that there are no dummy l-mer counts if we are at a fully valid k-mer
+    assert(len < l || counts[num_states] == 0);
+
+    return len == l;  // valid l-mers counted
 }
 
 // Compute Shannon entropy from l-mer counts
@@ -149,14 +152,24 @@ std::string mask_low_entropy_regions(const std::string& sequence,
     // Pre-allocate l-mer count array once
     // Number of possible l-mers = 4^l = 1 << (2*l)
     const size_t num_states = static_cast<size_t>(1ULL) << (2 * l);
-    std::vector<int> counts(num_states);
+
+    // add extra position for invalid lmers
+    std::vector<int> counts(num_states + 1);
 
     const int total_lmers = static_cast<int>(k - l + 1);
+
+    CircularQueue<size_t> lmer_queue(total_lmers, num_states);
+
+    // initialize with dummy l-mers
+    counts[num_states] = total_lmers;
+
+    // num bases encoded
+    size_t len = 0;
 
     // Slide a k-mer window across the sequence
     for (size_t i = 0; i + k <= n; ++i) {
         // Fill counts for all l-mers within this k-mer
-        if (!count_lmers(sequence, i, k, l, counts)) {
+        if (!count_lmers(sequence, i, k, l, counts, lmer_queue, len)) {
             continue;
         }
 
