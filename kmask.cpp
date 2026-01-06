@@ -84,11 +84,13 @@ static inline bool count_next_lmer(const std::string& sequence,
                                    size_t l,
                                    std::vector<int>& counts,
                                    CircularQueue<size_t>& lmer_queue,
-                                   size_t& len) {
+                                   size_t& len,
+                                   size_t& bit_code) {
     // Rolling encoding of l-mers
     size_t num_states = counts.size() - 1;         // 4^l = 2^(2*l) possible l-mers
+    assert(num_states == (static_cast<size_t>(1ULL) << (2 * l)));
+
     size_t bit_mask = num_states - 1;          // bitmask with last 2*l bits = 1
-    size_t bit_code = 0;                       // rolling 2-bit-encoded l-mer
 
     // Encode next base into 2 bits
     int b = base_to_code(sequence[start]);
@@ -98,19 +100,20 @@ static inline bool count_next_lmer(const std::string& sequence,
     } else {
         // Shift previous bits left by 2 and OR with the new base
         bit_code = ((bit_code << 2) | static_cast<size_t>(b)) & bit_mask;
+        len = std::min(len + 1, k);
     }
 
     // first l-mer hasn't been encountered yet
-    if (start < l)
+    if (start < l - 1)
         return false;
 
     // we have at least one l-mer
     --counts[lmer_queue.front()];
-    lmer_queue.push_back(bit_code);
-    ++counts[bit_code];
 
-    if (b >= 0)
-        len = std::min(len + 1, k);
+    size_t code_to_push = len >= l ? bit_code : num_states;
+
+    lmer_queue.push_back(code_to_push);
+    ++counts[code_to_push];
 
     return len == k; // valid l-mers counted;
 }
@@ -122,6 +125,8 @@ static inline double compute_shannon_entropy(const std::vector<int>& counts, int
     }
 
     double entropy = 0.0;
+    assert(counts.size());
+    assert(counts.back() == 0);
     for (int c : counts) {
         if (c <= 0) continue;  // skip unused l-mer states
         double p = static_cast<double>(c) / static_cast<double>(total_lmers);
@@ -152,10 +157,11 @@ std::string mask_low_entropy_regions(const std::string& sequence,
 
     const int total_lmers = static_cast<int>(k - l + 1);
 
-    CircularQueue<size_t> lmer_queue(total_lmers, num_states);
+    size_t bit_code = num_states;                       // rolling 2-bit-encoded l-mer
+    CircularQueue<size_t> lmer_queue(total_lmers, bit_code);
 
     // initialize with dummy l-mers
-    counts[num_states] = total_lmers;
+    counts[bit_code] = total_lmers;
 
     // num bases encoded
     size_t len = 0;
@@ -163,18 +169,23 @@ std::string mask_low_entropy_regions(const std::string& sequence,
     // Slide a k-mer window across the sequence
     for (size_t i = 0; i < n; ++i) {
         // Fill counts for all l-mers within this k-mer
-        if (!count_next_lmer(sequence, i, k, l, counts, lmer_queue, len)) {
+        if (!count_next_lmer(sequence, i, k, l, counts, lmer_queue, len, bit_code)) {
             continue;
         }
+
+        assert(i + 1 >= k);
 
         // Compute Shannon entropy (bits) for this k-mer
         double entropy = compute_shannon_entropy(counts, total_lmers);
 
         // Mask low-entropy k-mers with 'N'
         if (entropy < threshold) {
-            masked.replace(i, k, std::string(k, 'N'));
+            masked.replace(i - k + 1, k, std::string(k, 'N'));
         }
     }
+
+    assert(masked.size() == sequence.size());
+
     return masked;
 }
 
@@ -196,7 +207,7 @@ static inline size_t count_masked_bases(const std::string& original_sequence,
 // -------------------- TOP-LEVEL PROCESSING --------------------
 
 // Write masked FASTA entries to output file
-void write_fasta(std::ofstream& out, 
+void write_fasta(std::ofstream& out,
                  const std::string& header,
                  const std::string& sequence) {
     constexpr size_t line_width = 80;
@@ -252,14 +263,12 @@ void write_bed(const std::string& header,
 }
 
 // Process FASTA files and optionally outputs BED of masked regions to stdout
-std::pair<std::size_t, std::size_t> process_fasta(
-    const std::string& input_file,
-    size_t k, size_t l, double threshold,
-    const std::string& output_dir,
-    bool verbose,
-    bool output_bed,
-    const std::string& full_command)
-{
+std::pair<std::size_t, std::size_t> process_fasta(const std::string& input_file,
+                                                  size_t k, size_t l, double threshold,
+                                                  const std::string& output_dir,
+                                                  bool verbose,
+                                                  bool output_bed,
+                                                  const std::string& full_command) {
     // Derive output filename
     std::filesystem::path in_path(input_file);
     std::string stem = in_path.stem().string();   // e.g. "abc"
