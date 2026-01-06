@@ -168,17 +168,30 @@ std::string mask_low_entropy_regions(const std::string& sequence,
     // num bases encoded
     size_t len = 0;
 
+    bool update_entropy = false;
+    double entropy = 0.0;
+
     // Slide a k-mer window across the sequence
     for (size_t i = 0; i < n; ++i) {
+        size_t last_bit_code_count = counts[lmer_queue.front()];
         // Fill counts for all l-mers within this k-mer
         if (!count_next_lmer(sequence, i, k, l, counts, lmer_queue, len, bit_code)) {
+            update_entropy = false;
             continue;
         }
 
         assert(i + 1 >= k);
 
         // Compute Shannon entropy (bits) for this k-mer
-        double entropy = compute_shannon_entropy(counts, total_lmers, plogp);
+        if (!update_entropy) {
+            entropy = compute_shannon_entropy(counts, total_lmers, plogp);
+            update_entropy = true;
+        } else {
+            assert(counts[bit_code]);
+            assert(last_bit_code_count);
+            entropy += plogp[counts[bit_code]] + plogp[last_bit_code_count - 1]
+                    - plogp[counts[bit_code] - 1] - plogp[last_bit_code_count];
+        }
 
         // Mask low-entropy k-mers with 'N'
         if (entropy < threshold) {
