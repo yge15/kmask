@@ -119,7 +119,9 @@ static inline bool count_next_lmer(const std::string& sequence,
 }
 
 // Compute Shannon entropy from l-mer counts
-static inline double compute_shannon_entropy(const std::vector<int>& counts, int total_lmers) {
+static inline double compute_shannon_entropy(const std::vector<int>& counts,
+                                             int total_lmers,
+                                             const std::vector<double>& plogp) {
     if (total_lmers <= 0) {
         return 0.0;
     }
@@ -128,9 +130,9 @@ static inline double compute_shannon_entropy(const std::vector<int>& counts, int
     assert(counts.size());
     assert(counts.back() == 0);
     for (int c : counts) {
+        assert(c >= 0);
         if (c <= 0) continue;  // skip unused l-mer states
-        double p = static_cast<double>(c) / static_cast<double>(total_lmers);
-        entropy -= p * std::log2(p);
+        entropy += plogp[c];
     }
     return entropy;
 }
@@ -140,7 +142,8 @@ static inline double compute_shannon_entropy(const std::vector<int>& counts, int
 // Mask low entropy regions: replace kmers with 'N's if entropy < threshold
 std::string mask_low_entropy_regions(const std::string& sequence,
                                      size_t k, size_t l,
-                                     double threshold) {
+                                     double threshold,
+                                     const std::vector<double>& plogp) {
     const size_t n = sequence.size();
     if (k == 0 || l == 0 || l > k || n < k) {
         return sequence;
@@ -176,7 +179,7 @@ std::string mask_low_entropy_regions(const std::string& sequence,
         assert(i + 1 >= k);
 
         // Compute Shannon entropy (bits) for this k-mer
-        double entropy = compute_shannon_entropy(counts, total_lmers);
+        double entropy = compute_shannon_entropy(counts, total_lmers, plogp);
 
         // Mask low-entropy k-mers with 'N'
         if (entropy < threshold) {
@@ -307,10 +310,17 @@ std::pair<std::size_t, std::size_t> process_fasta(const std::string& input_file,
     std::string header;
     std::string sequence;
 
+    const int total_lmers = static_cast<int>(k - l + 1);
+    std::vector<double> plogp(total_lmers + 1);
+    for (size_t i = 1; i < plogp.size(); ++i) {
+        double p = static_cast<double>(i) / total_lmers;
+        plogp[i] = -p * std::log2(p);
+    }
+
     // Stream one FASTA entry at a time
     while (read_fasta(in, header, sequence)) {
         // Mask low-entropy regions in this entry
-        std::string masked_sequence = mask_low_entropy_regions(sequence, k, l, threshold);
+        std::string masked_sequence = mask_low_entropy_regions(sequence, k, l, threshold, plogp);
 
         // Optionally write BED intervals for this entry (thread-safe inside write_bed)
         if (output_bed) {
