@@ -131,7 +131,6 @@ static inline double compute_shannon_entropy(const std::vector<int>& counts,
     assert(counts.back() == 0);
     for (int c : counts) {
         assert(c >= 0);
-        if (c <= 0) continue;  // skip unused l-mer states
         entropy += plogp[c];
     }
     return entropy;
