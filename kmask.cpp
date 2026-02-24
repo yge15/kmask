@@ -1,7 +1,9 @@
 // kmask.cpp
 
 #include "kmask.hpp"
+#include "circular_queue.hpp"
 #include <getopt.h>
+#include <assert.h>
 
 #include <fstream>
 #include <iostream>
@@ -76,59 +78,60 @@ static inline int base_to_code(char c) {
 }
 
 // Counts l-mers (substrings of length l) in a kmer
-static inline bool count_lmers(const std::string& sequence,
-                               size_t start,
-                               size_t k,
-                               size_t l,
-                               std::vector<int>& counts) {
-    // Reset counts
-    std::fill(counts.begin(), counts.end(), 0);
-
-    // Check for Ns and invalid bases
-    for (size_t j = 0; j < k; ++j) {
-        int code = base_to_code(sequence[start + j]);
-        if (code < 0) return false;        // invalid base → skip
-        // if (sequence[start + j] == 'N') return false;
-    }
-
+static inline bool count_next_lmer(const std::string& sequence,
+                                   size_t start,
+                                   size_t k,
+                                   size_t l,
+                                   std::vector<int>& counts,
+                                   CircularQueue<size_t>& lmer_queue,
+                                   size_t& len,
+                                   size_t& bit_code) {
     // Rolling encoding of l-mers
-    size_t num_states = counts.size();         // 4^l = 2^(2*l) possible l-mers
+    size_t num_states = counts.size() - 1;         // 4^l = 2^(2*l) possible l-mers
+    assert(num_states == (static_cast<size_t>(1ULL) << (2 * l)));
+
     size_t bit_mask = num_states - 1;          // bitmask with last 2*l bits = 1
-    size_t bit_code = 0;                       // rolling 2-bit-encoded l-mer
-    size_t len = 0;                            // number of bases encoded
 
-    for (size_t j = 0; j < k; ++j) {
-        // Encode next base into 2 bits
-        int b = base_to_code(sequence[start + j]);
+    // Encode next base into 2 bits
+    int b = base_to_code(sequence[start]);
+    if (b < 0) {
+        len = 0;
+        bit_code = num_states;
+    } else {
         // Shift previous bits left by 2 and OR with the new base
-        bit_code = (bit_code << 2) | static_cast<size_t>(b);
-
-        if (len + 1 < l) {
-            ++len;
-            continue;
-        }
-        if (len + 1 == l) {
-            ++len;
-            counts[bit_code & bit_mask]++;
-        } else {
-            bit_code &= bit_mask;
-            counts[bit_code]++;
-        }
+        bit_code = ((bit_code << 2) | static_cast<size_t>(b)) & bit_mask;
+        len = std::min(len + 1, k);
     }
-    return true;  // valid l-mers counted
+
+    // first l-mer hasn't been encountered yet
+    if (start < l - 1)
+        return false;
+
+    // we have at least one l-mer
+    --counts[lmer_queue.front()];
+
+    size_t code_to_push = len >= l ? bit_code : num_states;
+
+    lmer_queue.push_back(code_to_push);
+    ++counts[code_to_push];
+
+    return len == k; // valid l-mers counted;
 }
 
 // Compute Shannon entropy from l-mer counts
-static inline double compute_shannon_entropy(const std::vector<int>& counts, int total_lmers) {
+static inline double compute_shannon_entropy(const std::vector<int>& counts,
+                                             int total_lmers,
+                                             const std::vector<double>& plogp) {
     if (total_lmers <= 0) {
         return 0.0;
     }
 
     double entropy = 0.0;
+    assert(counts.size());
+    assert(counts.back() == 0);
     for (int c : counts) {
-        if (c <= 0) continue;  // skip unused l-mer states
-        double p = static_cast<double>(c) / static_cast<double>(total_lmers);
-        entropy -= p * std::log2(p);
+        assert(c >= 0);
+        entropy += plogp[c];
     }
     return entropy;
 }
@@ -138,7 +141,8 @@ static inline double compute_shannon_entropy(const std::vector<int>& counts, int
 // Mask low entropy regions: replace kmers with 'N's if entropy < threshold
 std::string mask_low_entropy_regions(const std::string& sequence,
                                      size_t k, size_t l,
-                                     double threshold) {
+                                     double threshold,
+                                     const std::vector<double>& plogp) {
     const size_t n = sequence.size();
     if (k == 0 || l == 0 || l > k || n < k) {
         return sequence;
@@ -149,25 +153,54 @@ std::string mask_low_entropy_regions(const std::string& sequence,
     // Pre-allocate l-mer count array once
     // Number of possible l-mers = 4^l = 1 << (2*l)
     const size_t num_states = static_cast<size_t>(1ULL) << (2 * l);
-    std::vector<int> counts(num_states);
+
+    // add extra position for invalid lmers
+    std::vector<int> counts(num_states + 1);
 
     const int total_lmers = static_cast<int>(k - l + 1);
 
+    size_t bit_code = num_states;                       // rolling 2-bit-encoded l-mer
+    CircularQueue<size_t> lmer_queue(total_lmers, bit_code);
+
+    // initialize with dummy l-mers
+    counts[bit_code] = total_lmers;
+
+    // num bases encoded
+    size_t len = 0;
+
+    bool update_entropy = false;
+    double entropy = 0.0;
+
     // Slide a k-mer window across the sequence
-    for (size_t i = 0; i + k <= n; ++i) {
+    for (size_t i = 0; i < n; ++i) {
+        size_t last_bit_code_count = counts[lmer_queue.front()];
         // Fill counts for all l-mers within this k-mer
-        if (!count_lmers(sequence, i, k, l, counts)) {
+        if (!count_next_lmer(sequence, i, k, l, counts, lmer_queue, len, bit_code)) {
+            update_entropy = false;
             continue;
         }
 
+        assert(i + 1 >= k);
+
         // Compute Shannon entropy (bits) for this k-mer
-        double entropy = compute_shannon_entropy(counts, total_lmers);
+        if (!update_entropy) {
+            entropy = compute_shannon_entropy(counts, total_lmers, plogp);
+            update_entropy = true;
+        } else {
+            assert(counts[bit_code]);
+            assert(last_bit_code_count);
+            entropy += plogp[counts[bit_code]] + plogp[last_bit_code_count - 1]
+                    - plogp[counts[bit_code] - 1] - plogp[last_bit_code_count];
+        }
 
         // Mask low-entropy k-mers with 'N'
         if (entropy < threshold) {
-            masked.replace(i, k, std::string(k, 'N'));
+            masked.replace(i - k + 1, k, std::string(k, 'N'));
         }
     }
+
+    assert(masked.size() == sequence.size());
+
     return masked;
 }
 
@@ -189,7 +222,7 @@ static inline size_t count_masked_bases(const std::string& original_sequence,
 // -------------------- TOP-LEVEL PROCESSING --------------------
 
 // Write masked FASTA entries to output file
-void write_fasta(std::ofstream& out, 
+void write_fasta(std::ofstream& out,
                  const std::string& header,
                  const std::string& sequence) {
     constexpr size_t line_width = 80;
@@ -245,14 +278,12 @@ void write_bed(const std::string& header,
 }
 
 // Process FASTA files and optionally outputs BED of masked regions to stdout
-std::pair<std::size_t, std::size_t> process_fasta(
-    const std::string& input_file,
-    size_t k, size_t l, double threshold,
-    const std::string& output_dir,
-    bool verbose,
-    bool output_bed,
-    const std::string& full_command)
-{
+std::pair<std::size_t, std::size_t> process_fasta(const std::string& input_file,
+                                                  size_t k, size_t l, double threshold,
+                                                  const std::string& output_dir,
+                                                  bool verbose,
+                                                  bool output_bed,
+                                                  const std::string& full_command) {
     // Derive output filename
     std::filesystem::path in_path(input_file);
     std::string stem = in_path.stem().string();   // e.g. "abc"
@@ -291,10 +322,17 @@ std::pair<std::size_t, std::size_t> process_fasta(
     std::string header;
     std::string sequence;
 
+    const int total_lmers = static_cast<int>(k - l + 1);
+    std::vector<double> plogp(total_lmers + 1);
+    for (size_t i = 1; i < plogp.size(); ++i) {
+        double p = static_cast<double>(i) / total_lmers;
+        plogp[i] = -p * std::log2(p);
+    }
+
     // Stream one FASTA entry at a time
     while (read_fasta(in, header, sequence)) {
         // Mask low-entropy regions in this entry
-        std::string masked_sequence = mask_low_entropy_regions(sequence, k, l, threshold);
+        std::string masked_sequence = mask_low_entropy_regions(sequence, k, l, threshold, plogp);
 
         // Optionally write BED intervals for this entry (thread-safe inside write_bed)
         if (output_bed) {
