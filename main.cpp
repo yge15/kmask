@@ -22,21 +22,21 @@ void print_help(const char* program_name) {
         "Options:\n"
         "  -k, --kmer_len <int>        Length of k-mers (default: 31)\n"
         "  -l, --lmer_len <int>        Length of l-mers (default: 3)\n"
-        "  -s, --threshold <float>     Entropy threshold (defualt: 3.4)\n"
+        "  -s, --threshold <float>     Entropy threshold (defualt: 3.3)\n"
         "  -t, --threads <int>         Number of threads (default: 1)\n"
         "  -o, --output-dir <path>     Output directory (default: .)\n"
         "  -b, --bed                   Output BED of masked regions\n"
         "  -v, --verbose               Enable detailed logging: per-file summaries and global statistics\n"
         "  -h, --help                  Display usage information\n\n"
         "Example:\n"
-        "  " << program_name << " -k 31 -l 3 -s 3.4 -t 8 -o masked/ genome.fa\n";
+        "  " << program_name << " -k 31 -l 3 -s 3.3 -t 8 -o masked/ genome.fa\n";
 }
 
 int main(int argc, char* argv[]) {
     // Default parameters
     std::size_t k = 31;
     std::size_t l = 3;
-    double entropy_threshold = 3.4;
+    double entropy_threshold = 3.3;
     int num_threads = 1;
     bool output_bed = false;
     bool verbose = false;
