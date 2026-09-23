@@ -4,23 +4,6 @@
 
 Kmask is a fast, multithreaded C++ tool that finds low-complexity regions in genomic FASTA files using Shannon entropy and replaces them with `N`. It is designed as a preprocessing step before building [Kraken2](https://github.com/DerrickWood/kraken2) or [KrakenUniq](https://github.com/fbreitwieser/krakenuniq) databases: removing low-complexity k-mers reduces spurious matches and false-positive classifications in metagenomic classification.
 
-## How it works
-
-Kmask slides a window of `k` bases along each sequence. For every window it:
-
-1. counts the `k - l + 1` overlapping l-mers (substrings of length `l`) in the window,
-2. computes the Shannon entropy of the l-mer frequency distribution,
-
-   ```
-   H = -sum_i( p_i * log2(p_i) ),   p_i = count of l-mer i / (k - l + 1)
-   ```
-
-3. replaces all `k` bases of the window with `N` if `H` is below the threshold.
-
-Repetitive windows (poly-A runs, short tandem repeats, and so on) use only a few distinct l-mers and score low. Diverse windows score high and are left alone. Entropy is updated incrementally as the window slides, so each window costs constant time.
-
-**Note on thresholds.** The maximum possible entropy depends on `k` and `l` (it is `log2(min(4^l, k - l + 1))`). With the defaults (`k=31`, `l=3`) the maximum is about 4.86 bits. Thresholds are therefore only comparable between runs that use the same `k` and `l`.
-
 ## Installation
 
 ### Build from source
